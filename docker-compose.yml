@@ -1,0 +1,191 @@
+version: "3.9"
+services:
+  redis-cart:
+    image: redis:alpine
+    container_name: redis-cart
+    mem_limit: 200Mi
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data:/data
+  paymentservice:
+    build: ./src/paymentservice
+    container_name: paymentservice
+    environment:
+      - PORT=50051
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+      - DISABLE_DEBUGGER=1
+    healthcheck:
+      interval: 10s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:50051 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "50051"
+    stop_signal: SIGTERM
+  shippingservice:
+    build: ./src/shippingservice
+    container_name: shippingservice
+    environment:
+      - PORT=50051
+      - DISABLE_STATS=1
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+    healthcheck:
+      interval: 10s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:50051 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "50051"
+  emailservice:
+    build: ./src/emailservice
+    container_name: emailservice
+    environment:
+      - PORT=8080
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+    healthcheck:
+      interval: 5s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:8080 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "8080"
+    stop_signal: SIGTERM
+  cartservice:
+    build: ./src/cartservice/src
+    container_name: cartservice
+    environment:
+      - REDIS_ADDR=redis-cart:6379
+    healthcheck:
+      interval: 10s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:7070 -rpc-timeout=5s 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "7070"
+    stop_signal: SIGTERM
+  currencyservice:
+    build: ./src/currencyservice
+    container_name: currencyservice
+    environment:
+      - PORT=7000
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+      - DISABLE_DEBUGGER=1
+    healthcheck:
+      interval: 10s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:7000 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "7000"
+    stop_signal: SIGTERM
+  productcatalogservice:
+    build: ./src/productcatalogservice
+    container_name: productcatalogservice
+    environment:
+      - PORT=3550
+      - DISABLE_STATS=1
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+    healthcheck:
+      interval: 10s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:3550 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "3550"
+    stop_signal: SIGTERM
+  recommendationservice:
+    build: ./src/recommendationservice
+    container_name: recommendationservice
+    environment:
+      - PORT=8080
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+      - DISABLE_DEBUGGER=1
+    healthcheck:
+      interval: 5s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:8080 
+      timeout: 1s
+    mem_limit: 220Mi
+    ports:
+      - "8080"
+    stop_signal: SIGTERM
+  adservice:
+    build: ./src/adservice
+    container_name: adservice
+    environment:
+      - PORT=9555
+      - DISABLE_STATS=1
+      - DISABLE_TRACING=1
+    healthcheck:
+      interval: 15s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:9555 
+      timeout: 1s
+    mem_limit: 180Mi
+    ports:
+      - "9555"
+    stop_signal: SIGTERM
+  checkoutservice:
+    build: ./src/checkoutservice
+    container_name: checkoutservice
+    environment:
+      - PORT=5050
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+      - SHIPPING_SERVICE_ADDR=shippingservice:50051
+      - PAYMENT_SERVICE_ADDR=paymentservice:50051
+      - EMAIL_SERVICE_ADDR=emailservice:5000
+      - CURRENCY_SERVICE_ADDR=currencyservice:7000
+      - CART_SERVICE_ADDR=cartservice:7070
+      - DISABLE_STATS=1
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+    healthcheck:
+      interval: 10s
+      retries: 0
+      test: /bin/grpc_health_probe -addr=:5050 
+      timeout: 1s
+    mem_limit: 64Mi
+    ports:
+      - "5050"
+  frontend:
+    build: ./src/frontend
+    container_name: frontend
+    environment:
+      - PORT=8080
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:3550
+      - CURRENCY_SERVICE_ADDR=currencyservice:7000
+      - CART_SERVICE_ADDR=cartservice:7070
+      - RECOMMENDATION_SERVICE_ADDR=recommendationservice:8080
+      - SHIPPING_SERVICE_ADDR=shippingservice:50051
+      - CHECKOUT_SERVICE_ADDR=checkoutservice:5050
+      - AD_SERVICE_ADDR=adservice:9555
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+    mem_limit: 64Mi
+    ports:
+      - "8080:8080"
+  # loadgenerator:
+  #   build: ./src/loadgenerator
+  #   deploy:
+  #     replicas: 1
+  #     restart_policy:
+  #       condition: always
+  #   environment:
+  #     - FRONTEND_ADDR=frontend:80
+  #     - USERS=10
+  #   mem_limit: 256Mi
+  #   stop_signal: SIGTERM
