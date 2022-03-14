@@ -1,0 +1,27 @@
+version: "3.9"
+services:
+  baseservice:
+    environment:
+      - REDIS_ADDR=redis-cart:6379
+      - PRODUCT_CATALOG_SERVICE_ADDR=productcatalogservice:7000
+      - CURRENCY_SERVICE_ADDR=currencyservice:7000
+      - CART_SERVICE_ADDR=cartservice:7000
+      - RECOMMENDATION_SERVICE_ADDR=recommendationservice:7000
+      - SHIPPING_SERVICE_ADDR=shippingservice:7000
+      - CHECKOUT_SERVICE_ADDR=checkoutservice:7000
+      - AD_SERVICE_ADDR=adservice:7000
+      - PAYMENT_SERVICE_ADDR=paymentservice:7000
+      - EMAIL_SERVICE_ADDR=emailservice:7000
+      - ASPNETCORE_URLS=http://*:7000
+      # - DISABLE_STATS=1
+      - DISABLE_TRACING=1
+      - DISABLE_PROFILER=1
+      # - DISABLE_DEBUGGER=1
+      # for loadgenerator
+      - FRONTEND_ADDR=frontend:80
+      - USERS=10
+    depends_on:
+      - redis-cart
+    networks:
+      - default
+      - transcoorditor
