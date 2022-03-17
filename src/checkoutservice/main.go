@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"contrib.go.opencensus.io/exporter/jaeger"
 	"contrib.go.opencensus.io/exporter/stackdriver"
 	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/plugin/ocgrpc"
 	"go.opencensus.io/stats/view"
@@ -35,6 +37,7 @@ import (
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/genproto"
 	money "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/money"
+	"github.com/barrydevp/transco"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -43,7 +46,11 @@ const (
 	usdCurrency = "USD"
 )
 
-var log *logrus.Logger
+var (
+	orders    = make(map[string]*pb.OrderResult)
+	log       *logrus.Logger
+	txnClient *transco.Client
+)
 
 func init() {
 	log = logrus.New()
@@ -57,6 +64,7 @@ func init() {
 		TimestampFormat: time.RFC3339Nano,
 	}
 	log.Out = os.Stdout
+	txnClient = transco.New(os.Getenv("TRANSCOORDITOR_ADDR"))
 }
 
 type checkoutService struct {
@@ -114,6 +122,20 @@ func main() {
 	pb.RegisterCheckoutServiceServer(srv, svc)
 	healthpb.RegisterHealthServer(srv, svc)
 	log.Infof("starting to listen on tcp: %q", lis.Addr().String())
+
+	r := mux.NewRouter()
+	r.HandleFunc("/order/{id}/compensate", svc.compensateOrderHandler).Methods(http.MethodPost)
+
+	go func() {
+		httpPort := "8181"
+		if os.Getenv("HTTP_PORT") != "" {
+			httpPort = os.Getenv("HTTP_PORT")
+		}
+		addr := os.Getenv("LISTEN_ADDR")
+		log.Infof("starting http server on " + addr + ":" + httpPort)
+		log.Fatal(http.ListenAndServe(addr+":"+httpPort, r))
+	}()
+
 	err = srv.Serve(lis)
 	log.Fatal(err)
 }
@@ -215,6 +237,19 @@ func (cs *checkoutService) Watch(req *healthpb.HealthCheckRequest, ws healthpb.H
 	return status.Errorf(codes.Unimplemented, "health check via Watch not implemented")
 }
 
+func (cs *checkoutService) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.OrderResult, error) {
+	log.Infof("[GetOrder] order_id=%q", req.Id)
+
+	orderID := req.Id
+	order, ok := orders[orderID]
+
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "order not found")
+	}
+
+	return order, nil
+}
+
 func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
 	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
 
@@ -223,10 +258,23 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
 
+	orderResult := &pb.OrderResult{
+		OrderId:         orderID.String(),
+		ShippingAddress: req.Address,
+		Status:          pb.OrderResult_PENDING,
+	}
+	orders[orderID.String()] = orderResult
+	resp := &pb.PlaceOrderResponse{Order: orderResult}
+
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, err.Error())
+		resp.Error = err.Error()
+		// return nil, status.Errorf(codes.Internal, err.Error())
+		return resp, nil
 	}
+	orderResult.ShippingCost = prep.shippingCostLocalized
+	orderResult.Items = prep.orderItems
+	orderResult.Status = pb.OrderResult_PREPARED
 
 	total := pb.Money{CurrencyCode: req.UserCurrency,
 		Units: 0,
@@ -239,32 +287,138 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 
 	txID, err := cs.chargeCard(ctx, &total, req.CreditCard)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
+		resp.Error = err.Error()
+		// return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
+		return resp, nil
 	}
+	orderResult.Status = pb.OrderResult_PAID
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
 	shippingTrackingID, err := cs.shipOrder(ctx, req.Address, prep.cartItems)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
+		resp.Error = err.Error()
+		// return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
+		return resp, nil
 	}
+	orderResult.ShippingTrackingId = shippingTrackingID
+	orderResult.Status = pb.OrderResult_SHIPPED
 
 	_ = cs.emptyUserCart(ctx, req.UserId)
-
-	orderResult := &pb.OrderResult{
-		OrderId:            orderID.String(),
-		ShippingTrackingId: shippingTrackingID,
-		ShippingCost:       prep.shippingCostLocalized,
-		ShippingAddress:    req.Address,
-		Items:              prep.orderItems,
-	}
 
 	if err := cs.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
 		log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
 	} else {
 		log.Infof("order confirmation email sent to %q", req.Email)
 	}
-	resp := &pb.PlaceOrderResponse{Order: orderResult}
 	return resp, nil
+}
+
+func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
+	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+
+	orderID, err := uuid.NewUUID()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
+	}
+
+	session, err := txnClient.StartSession()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to start transaction: %v", err)
+	}
+
+	participant, err := session.JoinSession(&transco.ParticipantJoinBody{
+        ClientId: "checkoutservice",
+		RequestId: orderID.String(),
+	})
+	if err != nil {
+		session.AbortSession()
+		return nil, status.Errorf(codes.Internal, "failed to join session: %v", err)
+	}
+
+	orderResult := &pb.OrderResult{
+		OrderId:         orderID.String(),
+		ShippingAddress: req.Address,
+		Status:          pb.OrderResult_PENDING,
+	}
+	orders[orderID.String()] = orderResult
+	resp := &pb.PlaceOrderResponse{Order: orderResult}
+
+	uri := "http://checkoutservice:8181/order/" + orderID.String() + "/compensate"
+	if err := participant.PartialCommit(&transco.ParticipantAction{
+		Uri: &uri,
+	}, nil); err != nil {
+		orderResult.Status = pb.OrderResult_CANCELLED
+		session.AbortSession()
+		return nil, status.Errorf(codes.Internal, "failed to partial commit")
+	}
+
+	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
+	if err != nil {
+		session.AbortSession()
+		resp.Error = err.Error()
+		// return nil, status.Errorf(codes.Internal, err.Error())
+		return resp, nil
+	}
+	orderResult.ShippingCost = prep.shippingCostLocalized
+	orderResult.Items = prep.orderItems
+	orderResult.Status = pb.OrderResult_PREPARED
+
+	total := pb.Money{CurrencyCode: req.UserCurrency,
+		Units: 0,
+		Nanos: 0}
+	total = money.Must(money.Sum(total, *prep.shippingCostLocalized))
+	for _, it := range prep.orderItems {
+		multPrice := money.MultiplySlow(*it.Cost, uint32(it.GetItem().GetQuantity()))
+		total = money.Must(money.Sum(total, multPrice))
+	}
+
+	txID, err := cs.chargeCardTxn(ctx, session.Id, &total, req.CreditCard)
+	if err != nil {
+		session.AbortSession()
+		resp.Error = err.Error()
+		// return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
+		return resp, nil
+	}
+	orderResult.Status = pb.OrderResult_PAID
+	log.Infof("payment went through (transaction_id: %s)", txID)
+
+	shippingTrackingID, err := cs.shipOrderTxn(ctx, session.Id, req.Address, prep.cartItems)
+    log.Info(err)
+	if err != nil {
+		session.AbortSession()
+        log.Info("cannot abort success?")
+		resp.Error = err.Error()
+		// return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
+		return resp, nil
+	}
+	orderResult.ShippingTrackingId = shippingTrackingID
+	orderResult.Status = pb.OrderResult_SHIPPED
+
+	_ = cs.emptyUserCart(ctx, req.UserId)
+
+	if err := cs.sendOrderConfirmation(ctx, req.Email, orderResult); err != nil {
+		log.Warnf("failed to send order confirmation to %q: %+v", req.Email, err)
+	} else {
+		log.Infof("order confirmation email sent to %q", req.Email)
+	}
+
+	if err := session.CommitSession(); err != nil {
+		session.AbortSession()
+		return nil, status.Errorf(codes.Internal, "failed to commit session: %v", err)
+	}
+
+	return resp, nil
+}
+
+func (cs *checkoutService) compensateOrderHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	if order, ok := orders[id]; ok {
+		order.Status = pb.OrderResult_CANCELLED
+	}
+
+	w.WriteHeader(200)
+	w.Write(nil)
 }
 
 type orderPrep struct {
@@ -401,6 +555,23 @@ func (cs *checkoutService) chargeCard(ctx context.Context, amount *pb.Money, pay
 	return paymentResp.GetTransactionId(), nil
 }
 
+func (cs *checkoutService) chargeCardTxn(ctx context.Context, sessionId string, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
+	conn, err := grpc.DialContext(ctx, cs.paymentSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect payment service: %+v", err)
+	}
+	defer conn.Close()
+
+	paymentResp, err := pb.NewPaymentServiceClient(conn).ChargeTxn(ctx, &pb.ChargeRequestTxn{
+		SessionId:  sessionId,
+		Amount:     amount,
+		CreditCard: paymentInfo})
+	if err != nil {
+		return "", fmt.Errorf("could not charge the card: %+v", err)
+	}
+	return paymentResp.GetTransactionId(), nil
+}
+
 func (cs *checkoutService) sendOrderConfirmation(ctx context.Context, email string, order *pb.OrderResult) error {
 	conn, err := grpc.DialContext(ctx, cs.emailSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
 	if err != nil {
@@ -422,6 +593,22 @@ func (cs *checkoutService) shipOrder(ctx context.Context, address *pb.Address, i
 	resp, err := pb.NewShippingServiceClient(conn).ShipOrder(ctx, &pb.ShipOrderRequest{
 		Address: address,
 		Items:   items})
+	if err != nil {
+		return "", fmt.Errorf("shipment failed: %+v", err)
+	}
+	return resp.GetTrackingId(), nil
+}
+
+func (cs *checkoutService) shipOrderTxn(ctx context.Context, sessionId string, address *pb.Address, items []*pb.CartItem) (string, error) {
+	conn, err := grpc.DialContext(ctx, cs.shippingSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect shipping service: %+v", err)
+	}
+	defer conn.Close()
+	resp, err := pb.NewShippingServiceClient(conn).ShipOrderTxn(ctx, &pb.ShipOrderRequestTxn{
+		SessionId: sessionId,
+		Address:   address,
+		Items:     items})
 	if err != nil {
 		return "", fmt.Errorf("shipment failed: %+v", err)
 	}

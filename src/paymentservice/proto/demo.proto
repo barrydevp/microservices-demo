@@ -14,6 +14,8 @@
 
 syntax = "proto3";
 
+option go_package = ".";
+
 package hipstershop;
 
 // -----------------Cart service-----------------
@@ -105,6 +107,7 @@ message SearchProductsResponse {
 service ShippingService {
     rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse) {}
     rpc ShipOrder(ShipOrderRequest) returns (ShipOrderResponse) {}
+    rpc ShipOrderTxn(ShipOrderRequestTxn) returns (ShipOrderResponse) {}
 }
 
 message GetQuoteRequest {
@@ -119,6 +122,12 @@ message GetQuoteResponse {
 message ShipOrderRequest {
     Address address = 1;
     repeated CartItem items = 2;
+}
+
+message ShipOrderRequestTxn {
+    string sessionId = 1;
+    Address address = 2;
+    repeated CartItem items = 3;
 }
 
 message ShipOrderResponse {
@@ -174,6 +183,7 @@ message CurrencyConversionRequest {
 
 service PaymentService {
     rpc Charge(ChargeRequest) returns (ChargeResponse) {}
+    rpc ChargeTxn(ChargeRequestTxn) returns (ChargeResponse) {}
 }
 
 message CreditCardInfo {
@@ -186,6 +196,12 @@ message CreditCardInfo {
 message ChargeRequest {
     Money amount = 1;
     CreditCardInfo credit_card = 2;
+}
+
+message ChargeRequestTxn {
+    string sessionId = 1;
+    Money amount = 2;
+    CreditCardInfo credit_card = 3;
 }
 
 message ChargeResponse {
@@ -209,6 +225,14 @@ message OrderResult {
     Money shipping_cost = 3;
     Address  shipping_address = 4;
     repeated OrderItem items = 5;
+    enum Status {
+      PENDING = 0;
+      PREPARED = 1;
+      PAID = 2;
+      SHIPPED = 3;
+      CANCELLED = 4;
+    }
+    Status status = 6;
 }
 
 message SendOrderConfirmationRequest {
@@ -221,6 +245,12 @@ message SendOrderConfirmationRequest {
 
 service CheckoutService {
     rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse) {}
+    rpc PlaceOrderSaga(PlaceOrderRequest) returns (PlaceOrderResponse) {}
+    rpc GetOrder(GetOrderRequest) returns (OrderResult) {}
+}
+
+message GetOrderRequest {
+    string id = 1;
 }
 
 message PlaceOrderRequest {
@@ -234,6 +264,7 @@ message PlaceOrderRequest {
 
 message PlaceOrderResponse {
     OrderResult order = 1;
+    string error = 2; 
 }
 
 // ------------Ad service------------------

@@ -318,6 +318,54 @@ func (fe *frontendServer) viewCartHandler(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (fe *frontendServer) getOrderHandler(w http.ResponseWriter, r *http.Request) {
+	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
+	log.Debug("get order")
+
+	id := mux.Vars(r)["id"]
+
+	order, err := pb.NewCheckoutServiceClient(fe.checkoutSvcConn).
+		GetOrder(r.Context(), &pb.GetOrderRequest{
+			Id: id,
+		})
+
+	if err != nil {
+		renderHTTPError(log, r, w, errors.Wrap(err, "failed to complete the order"), http.StatusInternalServerError)
+		return
+	}
+
+	recommendations, _ := fe.getRecommendations(r.Context(), sessionID(r), nil)
+
+	totalPaid := *order.GetShippingCost()
+	for _, v := range order.GetItems() {
+		multPrice := money.MultiplySlow(*v.GetCost(), uint32(v.GetItem().GetQuantity()))
+		totalPaid = money.Must(money.Sum(totalPaid, multPrice))
+	}
+
+	currencies, err := fe.getCurrencies(r.Context())
+	if err != nil {
+		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+		return
+	}
+
+	if err := templates.ExecuteTemplate(w, "order", map[string]interface{}{
+		"session_id":        sessionID(r),
+		"request_id":        r.Context().Value(ctxKeyRequestID{}),
+		"user_currency":     currentCurrency(r),
+		"show_currency":     false,
+		"currencies":        currencies,
+		"order":             order,
+		"total_paid":        &totalPaid,
+		"recommendations":   recommendations,
+		"platform_css":      plat.css,
+		"platform_name":     plat.provider,
+		"is_cymbal_brand":   isCymbalBrand,
+		"deploymentDetails": deploymentDetailsMap,
+	}); err != nil {
+		log.Println(err)
+	}
+}
+
 func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Request) {
 	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
 	log.Debug("placing order")
@@ -337,6 +385,81 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 
 	order, err := pb.NewCheckoutServiceClient(fe.checkoutSvcConn).
 		PlaceOrder(r.Context(), &pb.PlaceOrderRequest{
+			Email: email,
+			CreditCard: &pb.CreditCardInfo{
+				CreditCardNumber:          ccNumber,
+				CreditCardExpirationMonth: int32(ccMonth),
+				CreditCardExpirationYear:  int32(ccYear),
+				CreditCardCvv:             int32(ccCVV)},
+			UserId:       sessionID(r),
+			UserCurrency: currentCurrency(r),
+			Address: &pb.Address{
+				StreetAddress: streetAddress,
+				City:          city,
+				State:         state,
+				ZipCode:       int32(zipCode),
+				Country:       country},
+		})
+	if err != nil {
+		renderHTTPError(log, r, w, errors.Wrap(err, "failed to complete the order"), http.StatusInternalServerError)
+
+		return
+	}
+	log.WithField("order", order.GetOrder().GetOrderId()).Info("order placed")
+
+	order.GetOrder().GetItems()
+	recommendations, _ := fe.getRecommendations(r.Context(), sessionID(r), nil)
+
+	totalPaid := *order.GetOrder().GetShippingCost()
+	for _, v := range order.GetOrder().GetItems() {
+		multPrice := money.MultiplySlow(*v.GetCost(), uint32(v.GetItem().GetQuantity()))
+		totalPaid = money.Must(money.Sum(totalPaid, multPrice))
+	}
+
+	currencies, err := fe.getCurrencies(r.Context())
+	if err != nil {
+		renderHTTPError(log, r, w, errors.Wrap(err, "could not retrieve currencies"), http.StatusInternalServerError)
+		return
+	}
+
+	if err := templates.ExecuteTemplate(w, "order", map[string]interface{}{
+		"session_id":        sessionID(r),
+		"request_id":        r.Context().Value(ctxKeyRequestID{}),
+		"user_currency":     currentCurrency(r),
+		"show_currency":     false,
+		"currencies":        currencies,
+		"order":             order.GetOrder(),
+		"total_paid":        &totalPaid,
+		"recommendations":   recommendations,
+		"platform_css":      plat.css,
+		"platform_name":     plat.provider,
+		"is_cymbal_brand":   isCymbalBrand,
+		"deploymentDetails": deploymentDetailsMap,
+		"error":             order.Error,
+	}); err != nil {
+		log.Println(err)
+	}
+}
+
+func (fe *frontendServer) placeOrderSagaHandler(w http.ResponseWriter, r *http.Request) {
+	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
+	log.Debug("placing order with saga")
+
+	var (
+		email         = r.FormValue("email")
+		streetAddress = r.FormValue("street_address")
+		zipCode, _    = strconv.ParseInt(r.FormValue("zip_code"), 10, 32)
+		city          = r.FormValue("city")
+		state         = r.FormValue("state")
+		country       = r.FormValue("country")
+		ccNumber      = r.FormValue("credit_card_number")
+		ccMonth, _    = strconv.ParseInt(r.FormValue("credit_card_expiration_month"), 10, 32)
+		ccYear, _     = strconv.ParseInt(r.FormValue("credit_card_expiration_year"), 10, 32)
+		ccCVV, _      = strconv.ParseInt(r.FormValue("credit_card_cvv"), 10, 32)
+	)
+
+	order, err := pb.NewCheckoutServiceClient(fe.checkoutSvcConn).
+		PlaceOrderSaga(r.Context(), &pb.PlaceOrderRequest{
 			Email: email,
 			CreditCard: &pb.CreditCardInfo{
 				CreditCardNumber:          ccNumber,
@@ -386,6 +509,7 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 		"platform_name":     plat.provider,
 		"is_cymbal_brand":   isCymbalBrand,
 		"deploymentDetails": deploymentDetailsMap,
+		"error":             order.Error,
 	}); err != nil {
 		log.Println(err)
 	}

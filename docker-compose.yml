@@ -16,7 +16,7 @@ x-grpc-helthcheck: &grpc-healthcheck
 networks:
   transcoorditor:
     external: true
-    name: transcoorditor_default
+    name: transcoorditor
 
 # Services configuration
 services:

@@ -16,6 +16,7 @@ const path = require('path');
 const grpc = require('@grpc/grpc-js');
 const pino = require('pino');
 const protoLoader = require('@grpc/proto-loader');
+const transco = require('./transco')
 
 const charge = require('./charge');
 
@@ -25,6 +26,8 @@ const logger = pino({
   changeLevelName: 'severity',
   useLevelLabels: true
 });
+
+const txnClient = new transco.Client(process.env.TRANSCOORDITOR_ADDR)
 
 class HipsterShopServer {
   constructor(protoRoot, port = HipsterShopServer.PORT) {
@@ -55,18 +58,55 @@ class HipsterShopServer {
     }
   }
 
+  static ChargeTxnServiceHandler(call, callback) {
+    logger.info(`PaymentService#ChargeTxn invoked with request ${JSON.stringify(call.request)}`);
+
+    try {
+      const { sessionId, credit_card: creditCard } = call.request
+
+      const session = txnClient.SessionFromId(sessionId)
+      session.JoinSession({
+        clientId: 'paymentservice',
+        requestId: creditCard.credit_card_number,
+      })
+        .then(async part => {
+          const response = charge(call.request);
+
+          await part.PartialCommit({
+            compensate: {
+              uri: 'http://paymentservice:8181/compensate',
+              data: call.request,
+            }
+          })
+
+          return response
+        })
+        .then((response) => {
+          callback(null, response);
+        })
+        .catch(err => {
+          console.warn(err);
+          callback(err);
+        })
+
+    } catch (err) {
+      console.warn(err);
+      callback(err);
+    }
+  }
+
   static CheckHandler(call, callback) {
     callback(null, { status: 'SERVING' });
   }
 
 
   listen() {
-    const server = this.server 
+    const server = this.server
     const port = this.port
     server.bindAsync(
       `0.0.0.0:${port}`,
       grpc.ServerCredentials.createInsecure(),
-      function () {
+      function() {
         logger.info(`PaymentService gRPC server started on port ${port}`);
         server.start();
       }
@@ -94,7 +134,8 @@ class HipsterShopServer {
     this.server.addService(
       hipsterShopPackage.PaymentService.service,
       {
-        charge: HipsterShopServer.ChargeServiceHandler.bind(this)
+        charge: HipsterShopServer.ChargeServiceHandler.bind(this),
+        chargeTxn: HipsterShopServer.ChargeTxnServiceHandler.bind(this),
       }
     );
 

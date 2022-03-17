@@ -17,12 +17,14 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
 	"cloud.google.com/go/profiler"
 	"contrib.go.opencensus.io/exporter/jaeger"
 	"contrib.go.opencensus.io/exporter/stackdriver"
+	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/plugin/ocgrpc"
 	"go.opencensus.io/stats/view"
@@ -94,10 +96,23 @@ func main() {
 	svc := &server{}
 	pb.RegisterShippingServiceServer(srv, svc)
 	healthpb.RegisterHealthServer(srv, svc)
-	log.Infof("Shipping Service listening on port %s", port)
+
+	r := mux.NewRouter()
+	r.HandleFunc("/tracking/{id}/compensate", svc.compensateShipHandler).Methods(http.MethodPost)
+
+	go func() {
+		httpPort := "8181"
+		if os.Getenv("HTTP_PORT") != "" {
+			httpPort = os.Getenv("HTTP_PORT")
+		}
+		addr := os.Getenv("LISTEN_ADDR")
+		log.Infof("starting http server on " + addr + ":" + httpPort)
+		log.Fatal(http.ListenAndServe(addr+":"+httpPort, r))
+	}()
 
 	// Register reflection service on gRPC server.
 	reflection.Register(srv)
+	log.Infof("Shipping Service listening on port %s", port)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
@@ -152,6 +167,28 @@ func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.Sh
 	return &pb.ShipOrderResponse{
 		TrackingId: id,
 	}, nil
+}
+
+func (s *server) ShipOrderTxn(ctx context.Context, in *pb.ShipOrderRequestTxn) (*pb.ShipOrderResponse, error) {
+	log.Info("[ShipOrderTxn] received request")
+	defer log.Info("[ShipOrderTxn] completed request")
+	// 1. Create a Tracking ID
+	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
+	id := CreateTrackingId(baseAddress)
+
+	// 2. Generate a response.
+	return &pb.ShipOrderResponse{
+		TrackingId: id,
+	}, nil
+}
+
+func (s *server) compensateShipHandler(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+
+	log.Info(fmt.Sprintf("[CompensateShip] receved compensate at tracking_id: %v", id))
+
+	w.WriteHeader(200)
+	w.Write(nil)
 }
 
 func initJaegerTracing() {

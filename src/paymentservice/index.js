@@ -17,7 +17,7 @@
 'use strict';
 
 
-if(process.env.DISABLE_PROFILER) {
+if (process.env.DISABLE_PROFILER) {
   console.log("Profiler disabled.")
 }
 else {
@@ -31,7 +31,7 @@ else {
 }
 
 
-if(process.env.DISABLE_TRACING) {
+if (process.env.DISABLE_TRACING) {
   console.log("Tracing disabled.")
 }
 else {
@@ -40,7 +40,7 @@ else {
 
 }
 
-if(process.env.DISABLE_DEBUGGER) {
+if (process.env.DISABLE_DEBUGGER) {
   console.log("Debugger disabled.")
 }
 else {
@@ -54,6 +54,8 @@ else {
 }
 
 
+const express = require('express')
+const http = require('http')
 const path = require('path');
 const HipsterShopServer = require('./server');
 
@@ -62,4 +64,30 @@ const PROTO_PATH = path.join(__dirname, '/proto/');
 
 const server = new HipsterShopServer(PROTO_PATH, PORT);
 
+const app = express()
+
+// all environments
+app.set('port', process.env.HTTP_PORT || 8181)
+app.use(express.logger('dev'))
+app.use(express.methodOverride())
+// app.use(express.session({ secret: 'your secret here' }))
+app.use(express.bodyParser())
+// app.use(app.router)
+// app.use(express.static(path.join(__dirname, 'public')))
+
+app.post('/compensate', (req, res) => {
+  console.log('====> COMPENSATE')
+  console.log(req.body)
+  console.log('=========')
+
+  res.send({ payment_compensate_ok: 1 })
+})
+
+http.createServer(app).listen(app.get('port'), () => {
+  console.log('HTTP server listening on port ' + app.get('port'))
+})
+
 server.listen();
+
+
+

@@ -30,11 +30,11 @@
             <div class="row">
                 <div class="col-12 text-center">
                     <h3>
-                        Your order is complete!
+                      {{if .error}} Your order is not complete! {{else}} Your order is complete! {{end}}
                     </h3>
                 </div>
                 <div class="col-12 text-center">
-                    <p>We've sent you a confirmation email.</p>
+                  <p>{{if .error}} {{.error}} {{else}} We've sent you a confirmation email. {{end}}</p>
                 </div>
             </div>
             <div class="row border-bottom-solid padding-y-24">
@@ -43,6 +43,14 @@
                 </div>
                 <div class="col-6 pr-md-0 text-right">
                     {{.order.OrderId}}
+                </div>
+            </div>
+            <div class="row border-bottom-solid padding-y-24">
+                <div class="col-6 pl-md-0">
+                    Status #
+                </div>
+                <div class="col-6 pr-md-0 text-right">
+                    {{.order.Status.String}}
                 </div>
             </div>
             <div class="row border-bottom-solid padding-y-24">
