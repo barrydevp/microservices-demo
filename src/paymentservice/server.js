@@ -16,7 +16,7 @@ const path = require('path');
 const grpc = require('@grpc/grpc-js');
 const pino = require('pino');
 const protoLoader = require('@grpc/proto-loader');
-const transco = require('./transco')
+const transco = require('transco-js')
 
 const charge = require('./charge');
 
@@ -27,7 +27,7 @@ const logger = pino({
   useLevelLabels: true
 });
 
-const txnClient = new transco.Client(process.env.TRANSCOORDITOR_ADDR)
+const txnClient = new transco.Client(process.env.TRANSCOORDITOR_URI)
 
 class HipsterShopServer {
   constructor(protoRoot, port = HipsterShopServer.PORT) {
@@ -64,23 +64,22 @@ class HipsterShopServer {
     try {
       const { sessionId, credit_card: creditCard } = call.request
 
-      const session = txnClient.SessionFromId(sessionId)
-      session.JoinSession({
-        clientId: 'paymentservice',
-        requestId: creditCard.credit_card_number,
-      })
-        .then(async part => {
-          const response = charge(call.request);
-
-          await part.PartialCommit({
-            compensate: {
-              uri: 'http://paymentservice:8181/compensate',
-              data: call.request,
-            }
-          })
-
-          return response
+      txnClient.SessionFromId(sessionId).then(async (session) => {
+        const part = await session.JoinSession({
+          clientId: 'paymentservice',
+          requestId: creditCard.credit_card_number,
         })
+        const response = charge(call.request);
+
+        await part.PartialCommit({
+          compensate: {
+            uri: 'http://paymentservice:8181/compensate',
+            data: call.request,
+          }
+        })
+
+        return response
+      })
         .then((response) => {
           callback(null, response);
         })

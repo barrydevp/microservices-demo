@@ -20,9 +20,10 @@ services:
       # for loadgenerator
       - FRONTEND_ADDR=frontend:80
       - USERS=10
-      - TRANSCOORDITOR_ADDR=http://transcoorditor:8000
-    depends_on:
-      - redis-cart
+      - TRANSCOORDITOR_ADDR=http://transcoorditor1:8000
+      - TRANSCOORDITOR_URI=http://transcoorditor1,transcoorditor2,transcoorditor3:8000
+    # depends_on:
+    #   - redis-cart
     networks:
       - default
       - transcoorditor

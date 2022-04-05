@@ -1,53 +1,53 @@
-const got = require('got')
+const {Connection} = require('./conn')
 
-const TRANSCOORDITOR_URL = 'http://coordinator:8000'
+const DEFAULT_URI = 'http://transcoorditor:8000'
 const V1_PREFIX_PATH = 'api/v1'
 
 class Client {
-  constructor(url) {
-    this.rest = got.extend({
-      prefixUrl: url || TRANSCOORDITOR_URL,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      resolveBodyOnly: true,
-      responseType: 'json',
-      json: {},
-    })
+  constructor(uri) {
+    if (!uri) {
+      uri = DEFAULT_URI
+    }
+
+    this.conn = new Connection(uri)
+
+    // connect in background
+    this.connecting = this.conn.connect()
+  }
+
+  async connect() {
+    if (!this.connecting) {
+      this.connecting = this.conn.connect()
+    }
+
+    await this.connecting
+
+    return this
   }
 
   v1SessionPath() {
     return V1_PREFIX_PATH + '/sessions'
   }
 
-  async _request(promise) {
-    try {
-      const resp = await promise
+  async SessionFromId(sessionId) {
+    const resp = await this.conn.request(
+      (rest) => rest.get(this.v1SessionPath() + '/' + sessionId)
+    )
 
-      return resp
-    } catch (err) {
-      const resp = err.response
-      if (resp) {
-        throw new Error(`non 200 status: ${resp.statusCode}, msg: ${resp.body.msg}, err: ${resp.body.err}`)
-      }
-
-      throw err
-    }
-  }
-
-  SessionFromId(sessionId) {
-    return new Session(this, { id: sessionId })
+    return new Session(this, resp.data)
   }
 
   async StartSession() {
-    const resp = await this._request(this.rest.post(this.v1SessionPath()))
+    const resp = await this.conn.request(
+      (rest) => rest.post(this.v1SessionPath())
+    )
 
     return new Session(this, resp.data)
   }
 
   async joinSession(sessionId, body, session) {
-    const resp = await this._request(
-      this.rest.post(this.v1SessionPath() + '/' + sessionId + '/join', {
+    const resp = await this.conn.request(
+      (rest) => rest.post(this.v1SessionPath() + '/' + sessionId + '/join', {
         json: body
       })
     )
@@ -60,8 +60,8 @@ class Client {
   }
 
   async partialCommit(sessionId, body, participant) {
-    const resp = await this._request(
-      this.rest.post(this.v1SessionPath() + '/' + sessionId + '/partial-commit', {
+    const resp = await this.conn.request(
+      (rest) => rest.post(this.v1SessionPath() + '/' + sessionId + '/partial-commit', {
         json: body
       })
     )
@@ -76,8 +76,8 @@ class Client {
   }
 
   async commitSession(sessionId, session) {
-    const resp = await this._request(
-      this.rest.post(this.v1SessionPath() + '/' + sessionId + '/commit')
+    const resp = await this.conn.request(
+      (rest) => rest.post(this.v1SessionPath() + '/' + sessionId + '/commit')
     )
 
     session.fromData(resp.data)
@@ -90,8 +90,8 @@ class Client {
   }
 
   async abortSession(sessionId, session) {
-    const resp = await this._request(
-      this.rest.post(this.v1SessionPath() + '/' + sessionId + '/abort')
+    const resp = await this.conn.request(
+      (rest) => rest.post(this.v1SessionPath() + '/' + sessionId + '/abort')
     )
 
     session.fromData(resp.data)
@@ -121,6 +121,8 @@ class Session {
     this.updatedAt = data.updatedAt
     this.createdAt = data.createdAt
     this.errors = data.errors
+    this.retries = data.retries
+    this.terminateReason = data.terminateReason
   }
 
   async JoinSession(body) {
@@ -162,3 +164,11 @@ class Participant {
     return session.client.partialCommit(session.id, body, this)
   }
 }
+
+setImmediate(async () => {
+  const client = new Client('http://localhost:8000')
+  await client.connect()
+
+  console.log(client.conn.leader)
+  console.log(client.conn.rsconf)
+})

@@ -5,6 +5,8 @@ x-baseservice: &baseservice
   extends:
     file: compose-common.yml
     service: baseservice
+  depends_on:
+    - redis-cart
 
 x-grpc-helthcheck: &grpc-healthcheck
   interval: 10s
@@ -24,7 +26,7 @@ services:
   redis-cart:
     image: redis:alpine
     container_name: redis-cart
-    mem_limit: 200Mi
+    mem_limit: 200m
     ports:
       - "6379:6379"
     volumes:
@@ -37,7 +39,7 @@ services:
     container_name: paymentservice
     environment:
       - PORT=7000
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -49,7 +51,7 @@ services:
     container_name: shippingservice
     environment:
       - PORT=7000
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
 
@@ -60,7 +62,7 @@ services:
     container_name: emailservice
     environment:
       - PORT=7000
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -73,7 +75,7 @@ services:
     environment:
       - PORT=7000
       - REDIS_ADDR=redis-cart:6379
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -85,7 +87,7 @@ services:
     container_name: currencyservice
     environment:
       - PORT=7000
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -97,7 +99,7 @@ services:
     container_name: productcatalogservice
     environment:
       - PORT=7000
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -109,7 +111,7 @@ services:
     container_name: recommendationservice
     environment:
       - PORT=7000
-    mem_limit: 220Mi
+    mem_limit: 220m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -121,7 +123,7 @@ services:
     container_name: adservice
     environment:
       - PORT=7000
-    mem_limit: 180Mi
+    mem_limit: 180m
     ports:
       - "7000"
     stop_signal: SIGTERM
@@ -133,7 +135,7 @@ services:
     container_name: checkoutservice
     environment:
       - PORT=7000
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "7000"
 
@@ -143,7 +145,7 @@ services:
     container_name: frontend
     environment:
       - PORT=8080
-    mem_limit: 64Mi
+    mem_limit: 64m
     ports:
       - "8080:8080"
   # loadgenerator:
@@ -156,5 +158,5 @@ services:
   #   environment:
   #     - FRONTEND_ADDR=frontend:80
   #     - USERS=10
-  #   mem_limit: 256Mi
+  #   mem_limit: 256m
   #   stop_signal: SIGTERM

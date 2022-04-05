@@ -24,6 +24,7 @@ import (
 	"cloud.google.com/go/profiler"
 	"contrib.go.opencensus.io/exporter/jaeger"
 	"contrib.go.opencensus.io/exporter/stackdriver"
+	"github.com/barrydevp/transco"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/plugin/ocgrpc"
@@ -43,7 +44,10 @@ const (
 	defaultPort = "50051"
 )
 
-var log *logrus.Logger
+var (
+	log       *logrus.Logger
+	txnClient *transco.Client
+)
 
 func init() {
 	log = logrus.New()
@@ -57,6 +61,9 @@ func init() {
 		TimestampFormat: time.RFC3339Nano,
 	}
 	log.Out = os.Stdout
+	trans, err := transco.New(os.Getenv("TRANSCOORDITOR_URI"))
+	txnClient = trans
+	log.Info("load Transco:", err)
 }
 
 func main() {
@@ -172,9 +179,28 @@ func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.Sh
 func (s *server) ShipOrderTxn(ctx context.Context, in *pb.ShipOrderRequestTxn) (*pb.ShipOrderResponse, error) {
 	log.Info("[ShipOrderTxn] received request")
 	defer log.Info("[ShipOrderTxn] completed request")
+	session, err := txnClient.SessionFromId(in.SessionId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to retrive session: %v", err)
+	}
+	participant, err := session.JoinSession(&transco.ParticipantJoinBody{
+		ClientId:  "shippingservice",
+		RequestId: in.SessionId,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to join session: %v", err)
+	}
+
 	// 1. Create a Tracking ID
 	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
 	id := CreateTrackingId(baseAddress)
+
+	uri := "http://shippingservice:8181/tracking/" + id + "/compensate"
+	if err := participant.PartialCommit(&transco.ParticipantAction{
+		Uri: &uri,
+	}, nil); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to partial commit")
+	}
 
 	// 2. Generate a response.
 	return &pb.ShipOrderResponse{

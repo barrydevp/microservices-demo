@@ -64,7 +64,7 @@ func init() {
 		TimestampFormat: time.RFC3339Nano,
 	}
 	log.Out = os.Stdout
-	txnClient = transco.New(os.Getenv("TRANSCOORDITOR_ADDR"))
+	txnClient, _ = transco.New(os.Getenv("TRANSCOORDITOR_URI"))
 }
 
 type checkoutService struct {
@@ -327,7 +327,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	}
 
 	participant, err := session.JoinSession(&transco.ParticipantJoinBody{
-        ClientId: "checkoutservice",
+		ClientId:  "checkoutservice",
 		RequestId: orderID.String(),
 	})
 	if err != nil {
@@ -383,10 +383,10 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
 	shippingTrackingID, err := cs.shipOrderTxn(ctx, session.Id, req.Address, prep.cartItems)
-    log.Info(err)
+	log.Info(err)
 	if err != nil {
 		session.AbortSession()
-        log.Info("cannot abort success?")
+		log.Info("abort session")
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
 		return resp, nil
