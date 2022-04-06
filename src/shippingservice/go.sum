@@ -70,6 +70,8 @@ github.com/barrydevp/transco v0.0.0-20220403160818-473231f3a9cf h1:Qd6Knu/arL/yH
 github.com/barrydevp/transco v0.0.0-20220403160818-473231f3a9cf/go.mod h1:FVGlczYSSt7M1rPv5MgjyIjH9m72tUKaKV3YEcsum5U=
 github.com/barrydevp/transco v0.0.0-20220403164928-3aa0520f684e h1:yf+4Lfye8VLY1TYswjPoYMY+3KpQSqLHil2kkEwW4I0=
 github.com/barrydevp/transco v0.0.0-20220403164928-3aa0520f684e/go.mod h1:FVGlczYSSt7M1rPv5MgjyIjH9m72tUKaKV3YEcsum5U=
+github.com/barrydevp/transco v0.0.0-20220406103406-19ccba1f97ce h1:zL9uUBK6lvjLghSVp7OEx/+VTbCLuM0ZvMh2CYWuFU0=
+github.com/barrydevp/transco v0.0.0-20220406103406-19ccba1f97ce/go.mod h1:FVGlczYSSt7M1rPv5MgjyIjH9m72tUKaKV3YEcsum5U=
 github.com/census-instrumentation/opencensus-proto v0.2.1/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=
 github.com/census-instrumentation/opencensus-proto v0.3.0 h1:t/LhUZLVitR1Ow2YOnduCsavhwFUklBMoGVYUCqmCqk=
 github.com/census-instrumentation/opencensus-proto v0.3.0/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=

@@ -20,7 +20,7 @@ require (
 	cloud.google.com/go/monitoring v1.1.0 // indirect
 	cloud.google.com/go/trace v1.0.0 // indirect
 	github.com/aws/aws-sdk-go v1.37.0 // indirect
-	github.com/barrydevp/transco v0.0.0-20220403164928-3aa0520f684e // indirect
+	github.com/barrydevp/transco v0.0.0-20220406103406-19ccba1f97ce // indirect
 	github.com/census-instrumentation/opencensus-proto v0.3.0 // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect
 	github.com/cncf/udpa/go v0.0.0-20201120205902-5459f2c99403 // indirect
