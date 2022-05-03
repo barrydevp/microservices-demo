@@ -247,6 +247,7 @@ service CheckoutService {
     rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse) {}
     rpc PlaceOrderSaga(PlaceOrderRequest) returns (PlaceOrderResponse) {}
     rpc GetOrder(GetOrderRequest) returns (OrderResult) {}
+    rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse) {}
 }
 
 message GetOrderRequest {

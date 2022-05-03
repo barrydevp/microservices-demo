@@ -452,6 +452,30 @@ func (cs *checkoutService) prepareOrderItemsAndShippingQuoteFromCart(ctx context
 	return out, nil
 }
 
+// GetQuote produces a shipping quote (cost) in USD.
+func (cs *checkoutService) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQuoteResponse, error) {
+	log.Info("[GetQuote] received request")
+	defer log.Info("[GetQuote] completed request")
+
+	// 1. Our quote system requires the total number of items to be shipped.
+	count := 0
+	for _, item := range in.Items {
+		count += int(item.Quantity)
+	}
+
+	// 2. Generate a quote based on the total number of items to be shipped.
+	quote := CreateQuoteFromCount(count)
+
+	// 3. Generate a response.
+	return &pb.GetQuoteResponse{
+		CostUsd: &pb.Money{
+			CurrencyCode: "USD",
+			Units:        int64(quote.Dollars),
+			Nanos:        int32(quote.Cents * 10000000)},
+	}, nil
+
+}
+
 func (cs *checkoutService) quoteShipping(ctx context.Context, address *pb.Address, items []*pb.CartItem) (*pb.Money, error) {
 	conn, err := grpc.DialContext(ctx, cs.shippingSvcAddr,
 		grpc.WithInsecure(),
@@ -461,10 +485,13 @@ func (cs *checkoutService) quoteShipping(ctx context.Context, address *pb.Addres
 	}
 	defer conn.Close()
 
-	shippingQuote, err := pb.NewShippingServiceClient(conn).
-		GetQuote(ctx, &pb.GetQuoteRequest{
-			Address: address,
-			Items:   items})
+	// shippingQuote, err := pb.NewShippingServiceClient(conn).
+	// 	GetQuote(ctx, &pb.GetQuoteRequest{
+	// 		Address: address,
+	// 		Items:   items})
+	shippingQuote, err := cs.GetQuote(ctx, &pb.GetQuoteRequest{
+		Address: address,
+		Items:   items})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shipping quote: %+v", err)
 	}
