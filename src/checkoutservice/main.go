@@ -38,6 +38,8 @@ import (
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/genproto"
 	money "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/money"
 	"github.com/barrydevp/transco"
+	"go.opentelemetry.io/otel"
+	// trace_ "go.opentelemetry.io/otel/sdk/trace"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -77,6 +79,12 @@ type checkoutService struct {
 }
 
 func main() {
+	if os.Getenv("ZIPKIN_URL") != "" {
+        log.Info("Zipkin enabled")
+		shutdown := initTracer(os.Getenv("ZIPKIN_URL"))
+		defer shutdown()
+	}
+
 	if os.Getenv("DISABLE_TRACING") == "" {
 		log.Info("Tracing enabled.")
 		go initTracing()
@@ -252,6 +260,9 @@ func (cs *checkoutService) GetOrder(ctx context.Context, req *pb.GetOrderRequest
 
 func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
 	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+	tr := otel.GetTracerProvider().Tracer("place-order")
+	ctx, span := tr.Start(ctx, "PlaceOrder")
+	defer span.End()
 
 	orderID, err := uuid.NewUUID()
 	if err != nil {

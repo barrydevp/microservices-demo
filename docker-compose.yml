@@ -7,6 +7,7 @@ x-baseservice: &baseservice
     service: baseservice
   depends_on:
     - redis-cart
+    - zipkin-collector
 
 x-grpc-helthcheck: &grpc-healthcheck
   interval: 10s
@@ -22,6 +23,10 @@ networks:
 
 # Services configuration
 services:
+  zipkin-collector:
+    image: openzipkin/zipkin-slim:latest
+    ports:
+      - "9411:9411"
 
   redis-cart:
     image: redis:alpine
