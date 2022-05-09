@@ -39,7 +39,10 @@ import (
 	money "github.com/GoogleCloudPlatform/microservices-demo/src/checkoutservice/money"
 	"github.com/barrydevp/transco"
 	"go.opentelemetry.io/otel"
-	// trace_ "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/attribute"
+	trace_ "go.opentelemetry.io/otel/trace"
+
+	// "go.opentelemetry.io/otel/propagation"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -80,8 +83,8 @@ type checkoutService struct {
 
 func main() {
 	if os.Getenv("ZIPKIN_URL") != "" {
-        log.Info("Zipkin enabled")
-		shutdown := initTracer(os.Getenv("ZIPKIN_URL"))
+		log.Info("Zipkin enabled")
+		shutdown := initTracer(os.Getenv("ZIPKIN_URL"), "checkout-service")
 		defer shutdown()
 	}
 
@@ -296,7 +299,7 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		total = money.Must(money.Sum(total, multPrice))
 	}
 
-	txID, err := cs.chargeCard(ctx, &total, req.CreditCard)
+	txID, err := cs.chargeCardWithTrace(ctx, &total, req.CreditCard)
 	if err != nil {
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
@@ -305,7 +308,7 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	orderResult.Status = pb.OrderResult_PAID
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
-	shippingTrackingID, err := cs.shipOrder(ctx, req.Address, prep.cartItems)
+	shippingTrackingID, err := cs.shipOrderWithTrace(ctx, ctx, req.Address, prep.cartItems)
 	if err != nil {
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
@@ -327,22 +330,77 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
 	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
 
+	tr := otel.GetTracerProvider().Tracer("place-order-saga")
+	ctx, span := tr.Start(ctx, "place order saga", trace_.WithAttributes(attribute.String("user_id", req.UserId)))
+	defer span.End()
+	traceCarrier := getTraceCarrier(ctx)
+
 	orderID, err := uuid.NewUUID()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
 
-	session, err := txnClient.StartSession()
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to start transaction: %v", err)
+	sendTrace := func(label string, fn func() error) {
+		_, span_ := tr.Start(ctx, label)
+		defer span_.End()
+		err := fn()
+		if err != nil {
+			span_.AddEvent(fmt.Sprintf("%v failed: %v", label, err))
+		}
 	}
 
-	participant, err := session.JoinSession(&transco.ParticipantJoinBody{
-		ClientId:  "checkoutservice",
-		RequestId: orderID.String(),
+	// _, span1 := tr.Start(ctx, "start session")
+	// span.AddEvent("start session")
+	var session *transco.Session
+	sendTrace("start session", func() error {
+		session, err = txnClient.StartSession()
+		return err
 	})
+	// session, err := txnClient.StartSession()
+	// span1.End()
 	if err != nil {
-		session.AbortSession()
+		// span.AddEvent("start session failed")
+		return nil, status.Errorf(codes.Internal, "failed to start transaction: %v", err)
+	}
+	span.SetAttributes(attribute.String("session_id", session.Id))
+
+	abortSession := func() {
+		// _, span_ := tr.Start(ctx, "abort session")
+		// span.SetAttributes(attribute.String("session_id", session.Id))
+		// _, span_ := tr.Start(ctx, "abort session")
+		// span.AddEvent("abort session")
+		// err := session.AbortSession()
+		// if err != nil {
+		// 	span.AddEvent(fmt.Sprintf("abort session failed: %v", err))
+		// } else {
+		// 	span.AddEvent("abort session ok")
+		// }
+		// span_.End()
+
+		sendTrace("abort session", func() error {
+			return session.AbortSession()
+		})
+	}
+
+	// _, span1 = tr.Start(ctx, "join session")
+	// span1.SetAttributes(attribute.String("session_id", session.Id))
+	// span.AddEvent("join session")
+	var participant *transco.Participant
+	sendTrace("join session", func() error {
+		participant, err = session.JoinSession(&transco.ParticipantJoinBody{
+			ClientId:  "checkoutservice",
+			RequestId: orderID.String(),
+		})
+		return err
+	})
+	// participant, err := session.JoinSession(&transco.ParticipantJoinBody{
+	// 	ClientId:  "checkoutservice",
+	// 	RequestId: orderID.String(),
+	// })
+	// span1.End()
+	if err != nil {
+		// span.AddEvent("join session failed")
+		abortSession()
 		return nil, status.Errorf(codes.Internal, "failed to join session: %v", err)
 	}
 
@@ -355,17 +413,37 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	resp := &pb.PlaceOrderResponse{Order: orderResult}
 
 	uri := "http://checkoutservice:8181/order/" + orderID.String() + "/compensate"
-	if err := participant.PartialCommit(&transco.ParticipantAction{
-		Uri: &uri,
-	}, nil); err != nil {
+	// _, span1 = tr.Start(ctx, "partial commit session")
+	// span1.SetAttributes(attribute.String("session_id", session.Id))
+	// span.AddEvent("partial commit session")
+	sendTrace("partial commit session", func() error {
+		err = participant.PartialCommit(&transco.ParticipantAction{
+			Uri:  &uri,
+			Data: map[string]string{"used_id": req.UserId, "user_currency": req.UserCurrency, "x-traceparent": traceCarrier.Get("traceparent")},
+		}, nil)
+		return err
+	})
+	// err = participant.PartialCommit(&transco.ParticipantAction{
+	// 	Uri:  &uri,
+	// 	Data: map[string]string{"used_id": req.UserId, "user_currency": req.UserCurrency, "x-traceparent": traceCarrier.Get("traceparent")},
+	// }, nil)
+	// span1.End()
+	if err != nil {
+		// span.AddEvent("partial commit session failed")
 		orderResult.Status = pb.OrderResult_CANCELLED
-		session.AbortSession()
+		abortSession()
 		return nil, status.Errorf(codes.Internal, "failed to partial commit")
 	}
 
-	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
+	var prep orderPrep
+	sendTrace("prepare order items and shipping quote", func() error {
+		prep, err = cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
+		return err
+	})
+	// prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
-		session.AbortSession()
+		// span.AddEvent(fmt.Sprintf("prepare order items and shipping quote failed: %v", err))
+		abortSession()
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Internal, err.Error())
 		return resp, nil
@@ -383,9 +461,15 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 		total = money.Must(money.Sum(total, multPrice))
 	}
 
-	txID, err := cs.chargeCardTxn(ctx, session.Id, &total, req.CreditCard)
+	var txID string
+	sendTrace("call charge card txn", func() error {
+		txID, err = cs.chargeCardTxnWithTrace(ctx, session.Id, &total, req.CreditCard)
+		return err
+	})
+	// txID, err := cs.chargeCardTxnWithTrace(ctx, session.Id, &total, req.CreditCard)
 	if err != nil {
-		session.AbortSession()
+		// span.AddEvent(fmt.Sprintf("charge card failed: %v", err))
+		abortSession()
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
 		return resp, nil
@@ -393,11 +477,17 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	orderResult.Status = pb.OrderResult_PAID
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
-	shippingTrackingID, err := cs.shipOrderTxn(ctx, session.Id, req.Address, prep.cartItems)
+	var shippingTrackingID string
+	sendTrace("call ship order txn", func() error {
+		shippingTrackingID, err = cs.shipOrderTxnWithTrace(ctx, ctx, session.Id, req.Address, prep.cartItems)
+		return err
+	})
+	// shippingTrackingID, err := cs.shipOrderTxnWithTrace(ctx, ctx, session.Id, req.Address, prep.cartItems)
 	log.Info(err)
 	if err != nil {
-		session.AbortSession()
-		log.Info("abort session")
+		// span.AddEvent(fmt.Sprintf("ship order failed: %v", err))
+		abortSession()
+		// session.AbortSession()
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
 		return resp, nil
@@ -413,8 +503,19 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 		log.Infof("order confirmation email sent to %q", req.Email)
 	}
 
-	if err := session.CommitSession(); err != nil {
-		session.AbortSession()
+	// _, span1 = tr.Start(ctx, "commit session")
+	// span1.SetAttributes(attribute.String("session_id", session.Id))
+	// span.AddEvent("commit session")
+	sendTrace("commit session", func() error {
+		err = session.CommitSession()
+		return err
+	})
+	// err = session.CommitSession()
+	// span1.End()
+	if err != nil {
+		// span.AddEvent(fmt.Sprintf("commit session failed: %v", err))
+		abortSession()
+		// session.AbortSession()
 		return nil, status.Errorf(codes.Internal, "failed to commit session: %v", err)
 	}
 
@@ -423,6 +524,12 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 
 func (cs *checkoutService) compensateOrderHandler(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+
+	// tracing
+	ctx := traceCtxFromHttpReq(context.Background(), r)
+	tr := otel.GetTracerProvider().Tracer("compensate-order")
+	ctx, span := tr.Start(ctx, "compensating order -> cancel order")
+	defer span.End()
 
 	if order, ok := orders[id]; ok {
 		order.Status = pb.OrderResult_CANCELLED
@@ -593,6 +700,39 @@ func (cs *checkoutService) chargeCard(ctx context.Context, amount *pb.Money, pay
 	return paymentResp.GetTransactionId(), nil
 }
 
+func (cs *checkoutService) chargeCardWithTrace(ctx context.Context, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
+	conn, err := grpc.DialContext(ctx, cs.paymentSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect payment service: %+v", err)
+	}
+	defer conn.Close()
+
+	paymentResp, err := pb.NewPaymentServiceClient(conn).Charge(injectTrace2GrpcCtx(ctx, ctx), &pb.ChargeRequest{
+		Amount:     amount,
+		CreditCard: paymentInfo})
+	if err != nil {
+		return "", fmt.Errorf("could not charge the card: %+v", err)
+	}
+	return paymentResp.GetTransactionId(), nil
+}
+
+func (cs *checkoutService) chargeCardTxnWithTrace(ctx context.Context, sessionId string, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
+	conn, err := grpc.DialContext(ctx, cs.paymentSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect payment service: %+v", err)
+	}
+	defer conn.Close()
+
+	paymentResp, err := pb.NewPaymentServiceClient(conn).ChargeTxn(injectTrace2GrpcCtx(ctx, ctx), &pb.ChargeRequestTxn{
+		SessionId:  sessionId,
+		Amount:     amount,
+		CreditCard: paymentInfo})
+	if err != nil {
+		return "", fmt.Errorf("could not charge the card: %+v", err)
+	}
+	return paymentResp.GetTransactionId(), nil
+}
+
 func (cs *checkoutService) chargeCardTxn(ctx context.Context, sessionId string, amount *pb.Money, paymentInfo *pb.CreditCardInfo) (string, error) {
 	conn, err := grpc.DialContext(ctx, cs.paymentSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
 	if err != nil {
@@ -637,6 +777,21 @@ func (cs *checkoutService) shipOrder(ctx context.Context, address *pb.Address, i
 	return resp.GetTrackingId(), nil
 }
 
+func (cs *checkoutService) shipOrderWithTrace(ctx context.Context, traceCtx context.Context, address *pb.Address, items []*pb.CartItem) (string, error) {
+	conn, err := grpc.DialContext(ctx, cs.shippingSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect email service: %+v", err)
+	}
+	defer conn.Close()
+	resp, err := pb.NewShippingServiceClient(conn).ShipOrder(injectTrace2GrpcCtx(ctx, traceCtx), &pb.ShipOrderRequest{
+		Address: address,
+		Items:   items})
+	if err != nil {
+		return "", fmt.Errorf("shipment failed: %+v", err)
+	}
+	return resp.GetTrackingId(), nil
+}
+
 func (cs *checkoutService) shipOrderTxn(ctx context.Context, sessionId string, address *pb.Address, items []*pb.CartItem) (string, error) {
 	conn, err := grpc.DialContext(ctx, cs.shippingSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
 	if err != nil {
@@ -644,6 +799,22 @@ func (cs *checkoutService) shipOrderTxn(ctx context.Context, sessionId string, a
 	}
 	defer conn.Close()
 	resp, err := pb.NewShippingServiceClient(conn).ShipOrderTxn(ctx, &pb.ShipOrderRequestTxn{
+		SessionId: sessionId,
+		Address:   address,
+		Items:     items})
+	if err != nil {
+		return "", fmt.Errorf("shipment failed: %+v", err)
+	}
+	return resp.GetTrackingId(), nil
+}
+
+func (cs *checkoutService) shipOrderTxnWithTrace(ctx context.Context, traceCtx context.Context, sessionId string, address *pb.Address, items []*pb.CartItem) (string, error) {
+	conn, err := grpc.DialContext(ctx, cs.shippingSvcAddr, grpc.WithInsecure(), grpc.WithStatsHandler(&ocgrpc.ClientHandler{}))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect shipping service: %+v", err)
+	}
+	defer conn.Close()
+	resp, err := pb.NewShippingServiceClient(conn).ShipOrderTxn(injectTrace2GrpcCtx(ctx, traceCtx), &pb.ShipOrderRequestTxn{
 		SessionId: sessionId,
 		Address:   address,
 		Items:     items})

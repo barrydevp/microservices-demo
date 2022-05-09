@@ -30,6 +30,8 @@ import (
 	"go.opencensus.io/plugin/ocgrpc"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -67,6 +69,12 @@ func init() {
 }
 
 func main() {
+	if os.Getenv("ZIPKIN_URL") != "" {
+		log.Info("Zipkin enabled")
+		shutdown := initTracer(os.Getenv("ZIPKIN_URL"), "shipping-service")
+		defer shutdown()
+	}
+
 	if os.Getenv("DISABLE_TRACING") == "" {
 		log.Info("Tracing enabled.")
 		go initTracing()
@@ -166,6 +174,13 @@ func (s *server) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQ
 func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
 	log.Info("[ShipOrder] received request")
 	defer log.Info("[ShipOrder] completed request")
+
+	// tracing
+	ctx = traceCtxFromGrpcCtx(ctx)
+	tr := otel.GetTracerProvider().Tracer("ship-order")
+	ctx, span := tr.Start(ctx, "ship order")
+	defer span.End()
+
 	// 1. Create a Tracking ID
 	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
 	id := CreateTrackingId(baseAddress)
@@ -179,14 +194,54 @@ func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.Sh
 func (s *server) ShipOrderTxn(ctx context.Context, in *pb.ShipOrderRequestTxn) (*pb.ShipOrderResponse, error) {
 	log.Info("[ShipOrderTxn] received request")
 	defer log.Info("[ShipOrderTxn] completed request")
-	session, err := txnClient.SessionFromId(in.SessionId)
+
+	// tracing
+	ctx = traceCtxFromGrpcCtx(ctx)
+	tr := otel.GetTracerProvider().Tracer("ship-order-txn")
+	ctx, span := tr.Start(ctx, "ship order txn")
+	defer span.End()
+	traceCarrier := getTraceCarrier(ctx)
+
+	sendTrace := func(label string, fn func() error) {
+		_, span_ := tr.Start(ctx, label)
+		// span_.SetAttributes(attribute.String("session_id", in.SessionId))
+		defer span_.End()
+		err := fn()
+		if err != nil {
+			span_.AddEvent(fmt.Sprintf("%v failed: %v", label, err))
+		}
+	}
+
+	// span.AddEvent("retrive session")
+	var session *transco.Session
+	var err error
+	sendTrace("retrive session", func() error {
+		session, err = txnClient.SessionFromId(in.SessionId)
+		return err
+	})
+	// session, err := txnClient.SessionFromId(in.SessionId)
 	if err != nil {
+		// span.AddEvent(fmt.Sprintf("retrive session failed: %v", err))
 		return nil, status.Errorf(codes.Internal, "failed to retrive session: %v", err)
 	}
-	participant, err := session.JoinSession(&transco.ParticipantJoinBody{
-		ClientId:  "shippingservice",
-		RequestId: in.SessionId,
+	span.SetAttributes(attribute.String("session_id", session.Id))
+	// _, span1 := tr.Start(ctx, "join session")
+	// span1.SetAttributes(attribute.String("session_id", session.Id))
+	// span.AddEvent("join session")
+	var participant *transco.Participant
+	sendTrace("join session", func() error {
+		participant, err = session.JoinSession(&transco.ParticipantJoinBody{
+			ClientId:  "shippingservice",
+			RequestId: in.SessionId,
+		})
+
+		return err
 	})
+	// participant, err := session.JoinSession(&transco.ParticipantJoinBody{
+	// 	ClientId:  "shippingservice",
+	// 	RequestId: in.SessionId,
+	// })
+	// span1.End()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to join session: %v", err)
 	}
@@ -195,10 +250,25 @@ func (s *server) ShipOrderTxn(ctx context.Context, in *pb.ShipOrderRequestTxn) (
 	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
 	id := CreateTrackingId(baseAddress)
 
+	// _, span1 = tr.Start(ctx, "partial commit session")
+	// span1.SetAttributes(attribute.String("session_id", session.Id))
 	uri := "http://shippingservice:8181/tracking/" + id + "/compensate"
-	if err := participant.PartialCommit(&transco.ParticipantAction{
-		Uri: &uri,
-	}, nil); err != nil {
+	// span.AddEvent("partial commit session")
+	sendTrace("partial commit session", func() error {
+		err = participant.PartialCommit(&transco.ParticipantAction{
+			Uri:  &uri,
+			Data: map[string]string{"x-traceparent": traceCarrier.Get("traceparent")},
+		}, nil)
+
+		return err
+	})
+	// err = participant.PartialCommit(&transco.ParticipantAction{
+	// 	Uri:  &uri,
+	// 	Data: map[string]string{"x-traceparent": traceCarrier.Get("traceparent")},
+	// }, nil)
+	// span1.End()
+	if err != nil {
+		// span.AddEvent(fmt.Sprintf("partial commit session failed: %v", err))
 		return nil, status.Errorf(codes.Internal, "failed to partial commit")
 	}
 
@@ -212,6 +282,12 @@ func (s *server) compensateShipHandler(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 
 	log.Info(fmt.Sprintf("[CompensateShip] receved compensate at tracking_id: %v", id))
+
+	// tracing
+	ctx := traceCtxFromHttpReq(context.Background(), r)
+	tr := otel.GetTracerProvider().Tracer("compensate-ship")
+	ctx, span := tr.Start(ctx, "compensating ship -> cancel ship")
+	defer span.End()
 
 	w.WriteHeader(200)
 	w.Write(nil)
