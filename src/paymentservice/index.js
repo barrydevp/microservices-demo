@@ -53,11 +53,12 @@ else {
   });
 }
 
-
+const tracing = require('./tracing')
 const express = require('express')
 const http = require('http')
 const path = require('path');
 const HipsterShopServer = require('./server');
+const { trace } = require('@opentelemetry/api');
 
 const PORT = process.env['PORT'];
 const PROTO_PATH = path.join(__dirname, '/proto/');
@@ -79,8 +80,12 @@ app.post('/compensate', (req, res) => {
   console.log('====> COMPENSATE')
   console.log(req.body)
   console.log('=========')
+  const ctx = tracing.traceCtxFromHttpReq(null, req)
+  const span = trace.getTracer("compensate-payment").startSpan("compensating payment => refund order", undefined, ctx)
 
   res.send({ payment_compensate_ok: 1 })
+
+  span.end()
 })
 
 http.createServer(app).listen(app.get('port'), () => {

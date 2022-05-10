@@ -17,6 +17,8 @@ const grpc = require('@grpc/grpc-js');
 const pino = require('pino');
 const protoLoader = require('@grpc/proto-loader');
 const transco = require('transco-js')
+const tracing = require('./tracing')
+const { trace } = require('@opentelemetry/api');
 
 const charge = require('./charge');
 
@@ -48,49 +50,85 @@ class HipsterShopServer {
    * @param {*} callback  fn(err, ChargeResponse)
    */
   static ChargeServiceHandler(call, callback) {
+    const ctx = tracing.traceCtxFromGrpcCall(null, call)
+    const tracer = trace.getTracer("charge-card")
+    const span = tracer.startSpan("charge card", undefined, ctx)
+
     try {
       logger.info(`PaymentService#Charge invoked with request ${JSON.stringify(call.request)}`);
       const response = charge(call.request);
       callback(null, response);
     } catch (err) {
+      span.addEvent(`charge card failed: ${err.message}`)
       console.warn(err);
       callback(err);
+    } finally {
+      span.end()
     }
   }
 
   static ChargeTxnServiceHandler(call, callback) {
     logger.info(`PaymentService#ChargeTxn invoked with request ${JSON.stringify(call.request)}`);
+    const { sessionId, credit_card: creditCard } = call.request
+    const ctx = tracing.traceCtxFromGrpcCall(null, call)
+    const tracer = trace.getTracer("charge-card")
+    const span = tracer.startSpan("charge card txn", undefined, ctx)
+    const carrier = tracing.getTraceCarrier(ctx)
+
+    const sendTrace = async (label, fn) => {
+      let span_ = tracer.startSpan(label, undefined, ctx)
+      try {
+        await fn()
+      } catch (e) {
+        span_.addEvent(`${label} failed: ${e.message}`)
+      } finally {
+        span_.end()
+      }
+    }
 
     try {
-      const { sessionId, credit_card: creditCard } = call.request
-
       txnClient.SessionFromId(sessionId).then(async (session) => {
-        const part = await session.JoinSession({
-          clientId: 'paymentservice',
-          requestId: creditCard.credit_card_number,
-        })
-        const response = charge(call.request);
+        let part = null
 
-        await part.PartialCommit({
-          compensate: {
-            uri: 'http://paymentservice:8181/compensate',
-            data: call.request,
-          }
+        await sendTrace("join session", async () => {
+          part = await session.JoinSession({
+            clientId: 'paymentservice',
+            requestId: creditCard.credit_card_number,
+          })
+        })
+
+        let response = null
+        sendTrace("charging card", () => {
+          response = charge(call.request);
+        })
+
+        await sendTrace("join session", async () => {
+          await part.PartialCommit({
+            compensate: {
+              uri: 'http://paymentservice:8181/compensate',
+              data: Object.assign({ 'x-traceparent': carrier.traceparent }, call.request),
+            }
+          })
         })
 
         return response
       })
         .then((response) => {
           callback(null, response);
+          span.end()
         })
         .catch(err => {
+          span.addEvent(`charge card failed: ${err.message}`)
           console.warn(err);
           callback(err);
+          span.end()
         })
 
     } catch (err) {
       console.warn(err);
+      span.addEvent(`charge card failed: ${err.message}`)
       callback(err);
+      span.end()
     }
   }
 
