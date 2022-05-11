@@ -74,9 +74,10 @@ class HipsterShopServer {
     const tracer = trace.getTracer("charge-card")
     const span = tracer.startSpan("charge card txn", undefined, ctx)
     const carrier = tracing.getTraceCarrier(ctx)
+    const childCtx = trace.setSpanContext(ctx, span.spanContext())
 
     const sendTrace = async (label, fn) => {
-      let span_ = tracer.startSpan(label, undefined, ctx)
+      let span_ = tracer.startSpan(label, undefined, childCtx)
       try {
         await fn()
       } catch (e) {

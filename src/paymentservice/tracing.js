@@ -113,7 +113,8 @@ exports.getTraceCarrier = (ctx) => {
 }
 
 exports.test = async () => {
-  const tracer = exports.initTrace('http://localhost:9411/api/v2/spans', 'test-svc')
+  exports.initTrace('http://localhost:9411/api/v2/spans', 'test-svc')
+  const tracer = trace.getTracer("charge-card")
 
   const parentSpan = tracer.startSpan('main');
 
@@ -173,8 +174,10 @@ exports.test = async () => {
   const pCtx1 = exports.traceCtxFromHttpReq(ROOT_CONTEXT, req)
   const pCtx2 = exports.traceCtxFromGrpcCall(ROOT_CONTEXT, call)
 
+  const s2 = tracer.startSpan("child-http", undefined, pCtx1);
+  tracer.startSpan("child-http-1", undefined, trace.setSpanContext(pCtx1, s2.spanContext())).end()
 
-  tracer.startSpan("child-http", undefined, pCtx1).end();
+  s2.end()
   tracer.startSpan("child-grpc", undefined, pCtx2).end();
 
   parentSpan.end()

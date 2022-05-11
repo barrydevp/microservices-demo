@@ -263,9 +263,24 @@ func (cs *checkoutService) GetOrder(ctx context.Context, req *pb.GetOrderRequest
 
 func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
 	log.Infof("[PlaceOrder] user_id=%q user_currency=%q", req.UserId, req.UserCurrency)
+	var err error
 	tr := otel.GetTracerProvider().Tracer("place-order")
-	ctx, span := tr.Start(ctx, "PlaceOrder")
-	defer span.End()
+	ctx, span := tr.Start(ctx, "place order")
+	defer func() {
+		if err != nil {
+			span.AddEvent(fmt.Sprintf("%v failed: %v", "place order", err))
+		}
+		span.End()
+	}()
+
+	sendTrace := func(label string, fn func(context.Context) error) {
+		traceCtx, span_ := tr.Start(ctx, label)
+		defer span_.End()
+		err_ := fn(traceCtx)
+		if err_ != nil {
+			span_.AddEvent(fmt.Sprintf("%v failed: %v", label, err_))
+		}
+	}
 
 	orderID, err := uuid.NewUUID()
 	if err != nil {
@@ -280,7 +295,12 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	orders[orderID.String()] = orderResult
 	resp := &pb.PlaceOrderResponse{Order: orderResult}
 
-	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
+	var prep orderPrep
+	sendTrace("prepare order items and shipping quote", func(traceCtx context.Context) error {
+		prep, err = cs.prepareOrderItemsAndShippingQuoteFromCart(traceCtx, req.UserId, req.UserCurrency, req.Address)
+		return err
+	})
+	// prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Internal, err.Error())
@@ -299,7 +319,12 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		total = money.Must(money.Sum(total, multPrice))
 	}
 
-	txID, err := cs.chargeCardWithTrace(ctx, &total, req.CreditCard)
+	var txID string
+	sendTrace("call charge card", func(traceCtx context.Context) error {
+		txID, err = cs.chargeCardWithTrace(traceCtx, &total, req.CreditCard)
+		return err
+	})
+	// txID, err := cs.chargeCardWithTrace(ctx, &total, req.CreditCard)
 	if err != nil {
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Internal, "failed to charge card: %+v", err)
@@ -308,7 +333,12 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 	orderResult.Status = pb.OrderResult_PAID
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
-	shippingTrackingID, err := cs.shipOrderWithTrace(ctx, ctx, req.Address, prep.cartItems)
+	var shippingTrackingID string
+	sendTrace("call ship order", func(traceCtx context.Context) error {
+		shippingTrackingID, err = cs.shipOrderWithTrace(ctx, traceCtx, req.Address, prep.cartItems)
+		return err
+	})
+	// shippingTrackingID, err := cs.shipOrderWithTrace(ctx, ctx, req.Address, prep.cartItems)
 	if err != nil {
 		resp.Error = err.Error()
 		// return nil, status.Errorf(codes.Unavailable, "shipping error: %+v", err)
@@ -340,10 +370,10 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
 
-	sendTrace := func(label string, fn func() error) {
-		_, span_ := tr.Start(ctx, label)
+	sendTrace := func(label string, fn func(traceCtx context.Context) error) {
+		traceCtx, span_ := tr.Start(ctx, label)
 		defer span_.End()
-		err := fn()
+		err := fn(traceCtx)
 		if err != nil {
 			span_.AddEvent(fmt.Sprintf("%v failed: %v", label, err))
 		}
@@ -352,7 +382,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	// _, span1 := tr.Start(ctx, "start session")
 	// span.AddEvent("start session")
 	var session *transco.Session
-	sendTrace("start session", func() error {
+	sendTrace("start session", func(traceCtx context.Context) error {
 		session, err = txnClient.StartSession()
 		return err
 	})
@@ -377,7 +407,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 		// }
 		// span_.End()
 
-		sendTrace("abort session", func() error {
+		sendTrace("abort session", func(traceCtx context.Context) error {
 			return session.AbortSession()
 		})
 	}
@@ -386,7 +416,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	// span1.SetAttributes(attribute.String("session_id", session.Id))
 	// span.AddEvent("join session")
 	var participant *transco.Participant
-	sendTrace("join session", func() error {
+	sendTrace("join session", func(traceCtx context.Context) error {
 		participant, err = session.JoinSession(&transco.ParticipantJoinBody{
 			ClientId:  "checkoutservice",
 			RequestId: orderID.String(),
@@ -416,7 +446,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	// _, span1 = tr.Start(ctx, "partial commit session")
 	// span1.SetAttributes(attribute.String("session_id", session.Id))
 	// span.AddEvent("partial commit session")
-	sendTrace("partial commit session", func() error {
+	sendTrace("partial commit session", func(traceCtx context.Context) error {
 		err = participant.PartialCommit(&transco.ParticipantAction{
 			Uri:  &uri,
 			Data: map[string]string{"used_id": req.UserId, "user_currency": req.UserCurrency, "x-traceparent": traceCarrier.Get("traceparent")},
@@ -436,7 +466,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	}
 
 	var prep orderPrep
-	sendTrace("prepare order items and shipping quote", func() error {
+	sendTrace("prepare order items and shipping quote", func(traceCtx context.Context) error {
 		prep, err = cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 		return err
 	})
@@ -462,8 +492,8 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	}
 
 	var txID string
-	sendTrace("call charge card txn", func() error {
-		txID, err = cs.chargeCardTxnWithTrace(ctx, session.Id, &total, req.CreditCard)
+	sendTrace("call charge card txn", func(traceCtx context.Context) error {
+		txID, err = cs.chargeCardTxnWithTrace(traceCtx, session.Id, &total, req.CreditCard)
 		return err
 	})
 	// txID, err := cs.chargeCardTxnWithTrace(ctx, session.Id, &total, req.CreditCard)
@@ -478,8 +508,8 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	log.Infof("payment went through (transaction_id: %s)", txID)
 
 	var shippingTrackingID string
-	sendTrace("call ship order txn", func() error {
-		shippingTrackingID, err = cs.shipOrderTxnWithTrace(ctx, ctx, session.Id, req.Address, prep.cartItems)
+	sendTrace("call ship order txn", func(traceCtx context.Context) error {
+		shippingTrackingID, err = cs.shipOrderTxnWithTrace(ctx, traceCtx, session.Id, req.Address, prep.cartItems)
 		return err
 	})
 	// shippingTrackingID, err := cs.shipOrderTxnWithTrace(ctx, ctx, session.Id, req.Address, prep.cartItems)
@@ -506,7 +536,7 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 	// _, span1 = tr.Start(ctx, "commit session")
 	// span1.SetAttributes(attribute.String("session_id", session.Id))
 	// span.AddEvent("commit session")
-	sendTrace("commit session", func() error {
+	sendTrace("commit session", func(traceCtx context.Context) error {
 		err = session.CommitSession()
 		return err
 	})
@@ -524,12 +554,18 @@ func (cs *checkoutService) PlaceOrderSaga(ctx context.Context, req *pb.PlaceOrde
 
 func (cs *checkoutService) compensateOrderHandler(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
+	var err error
 
 	// tracing
 	ctx := traceCtxFromHttpReq(context.Background(), r)
 	tr := otel.GetTracerProvider().Tracer("compensate-order")
 	ctx, span := tr.Start(ctx, "compensating order -> cancel order")
-	defer span.End()
+	defer func() {
+		if err != nil {
+			span.AddEvent(fmt.Sprintf("%v failed: %v", "place order", err))
+		}
+		span.End()
+	}()
 
 	if order, ok := orders[id]; ok {
 		order.Status = pb.OrderResult_CANCELLED
